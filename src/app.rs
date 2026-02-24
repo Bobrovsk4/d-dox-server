@@ -14,7 +14,7 @@ use migration::Migrator;
 use std::path::Path;
 
 #[allow(unused_imports)]
-use crate::{controllers, models::_entities::users, tasks, workers::downloader::DownloadWorker};
+use crate::{controllers, models::_entities::users};
 
 pub struct App;
 #[async_trait]
@@ -50,7 +50,6 @@ impl Hooks for App {
             .add_route(controllers::auth::routes())
     }
     async fn connect_workers(ctx: &AppContext, queue: &Queue) -> Result<()> {
-        queue.register(DownloadWorker::build(ctx)).await?;
         Ok(())
     }
 

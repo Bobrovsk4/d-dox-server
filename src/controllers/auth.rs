@@ -1,5 +1,4 @@
 use crate::{
-    mailers::auth::AuthMailer,
     models::{
         _entities::users,
         users::{LoginParams, RegisterParams},
@@ -66,8 +65,6 @@ async fn register(
         .set_email_verification_sent(&ctx.db)
         .await?;
 
-    AuthMailer::send_welcome(&ctx, &user).await?;
-
     format::json(())
 }
 
@@ -109,8 +106,6 @@ async fn forgot(
         .into_active_model()
         .set_forgot_password_sent(&ctx.db)
         .await?;
-
-    AuthMailer::forgot_password(&ctx, &user).await?;
 
     format::json(())
 }
@@ -199,7 +194,6 @@ async fn magic_link(
     };
 
     let user = user.into_active_model().create_magic_link(&ctx.db).await?;
-    AuthMailer::send_magic_link(&ctx, &user).await?;
 
     format::empty_json()
 }
@@ -252,7 +246,6 @@ async fn resend_verification_email(
         .set_email_verification_sent(&ctx.db)
         .await?;
 
-    AuthMailer::send_welcome(&ctx, &user).await?;
     tracing::info!(pid = user.pid.to_string(), "Verification email re-sent");
 
     format::json(())
