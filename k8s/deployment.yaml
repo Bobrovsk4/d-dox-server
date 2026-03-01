@@ -28,3 +28,14 @@ spec:
           requests:
             memory: "128Mi"
             cpu: "100m"
+        env:
+        - name: LOCO_ENV
+          value: development       # ← оставляем development
+        - name: LOCO_SERVER_RELOAD
+          value: "false"           # ← отключаем hot-reload (убирает порт 5150)
+        - name: LOCO_SERVER_BINDING
+          value: "0.0.0.0"         # ← слушать все интерфейсы
+        - name: LOCO_SERVER_PORT
+          value: "3000"            # ← явный порт
+        - name: LOCO_SERVER_HOST
+          value: "localhost" 
