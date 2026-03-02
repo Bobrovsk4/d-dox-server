@@ -10,7 +10,7 @@ COPY . .
 RUN cargo build --release --bin server-cli
 
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y ca-certificates openssl curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates openssl curl minio-client && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /app/target/release/server-cli /usr/local/bin/server
