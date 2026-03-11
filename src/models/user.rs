@@ -60,6 +60,10 @@ pub async fn find_by_login(db: &DatabaseConnection, login: &str) -> Result<Optio
     Entity::find().filter(Column::Login.eq(login)).one(db).await
 }
 
+pub async fn find_by_id(db: &DatabaseConnection, id: i32) -> Result<Option<Model>, DbErr> {
+    Entity::find_by_id(id).one(db).await
+}
+
 pub async fn find_by_username(
     db: &DatabaseConnection,
     username: &str,

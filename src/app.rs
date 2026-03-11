@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use loco_rs::{
     app::{AppContext, Hooks, Initializer},
-    bgworker::{BackgroundWorker, Queue},
+    bgworker::Queue,
     boot::{create_app, BootResult, StartMode},
     config::Config,
     controller::AppRoutes,
@@ -49,7 +49,7 @@ impl Hooks for App {
             .add_route(controllers::auth::routes())
             .add_route(controllers::files::routes())
     }
-    async fn connect_workers(ctx: &AppContext, queue: &Queue) -> Result<()> {
+    async fn connect_workers(_ctx: &AppContext, _queue: &Queue) -> Result<()> {
         Ok(())
     }
 
@@ -57,10 +57,10 @@ impl Hooks for App {
     fn register_tasks(tasks: &mut Tasks) {
         // tasks-inject (do not remove)
     }
-    async fn truncate(ctx: &AppContext) -> Result<()> {
+    async fn truncate(_ctx: &AppContext) -> Result<()> {
         Ok(())
     }
-    async fn seed(ctx: &AppContext, base: &Path) -> Result<()> {
+    async fn seed(_ctx: &AppContext, _base: &Path) -> Result<()> {
         Ok(())
     }
 }

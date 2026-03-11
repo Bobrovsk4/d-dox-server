@@ -6,7 +6,6 @@ use axum::{
     routing::{get, post},
     Json,
 };
-use futures_util::StreamExt;
 use loco_rs::{controller::Routes, prelude::*};
 use object_store::{
     aws::{AmazonS3, AmazonS3Builder},
@@ -16,16 +15,26 @@ use object_store::{
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+use crate::models::{file, user};
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileInfo {
+    pub id: i32,
     pub name: String,
-    pub size: usize,
-    pub last_modified: Option<String>,
+    pub size: i64,
+    pub author: AuthorInfo,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthorInfo {
+    pub id: i32,
+    pub login: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UploadResponse {
-    pub uploaded: Vec<String>,
+    pub uploaded: Vec<FileInfo>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -81,11 +90,17 @@ fn create_s3_store(config: &S3Config) -> Result<AmazonS3> {
 
 pub async fn upload_file(
     State(ctx): State<AppContext>,
+    auth: auth::JWT,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>> {
     let config = get_s3_config(&ctx);
     let store = create_s3_store(&config)?;
     let mut uploaded = Vec::new();
+
+    let user_id: i32 = auth.claims.pid.parse().unwrap_or(0);
+    let author = user::find_by_id(&ctx.db, user_id)
+        .await?
+        .ok_or_else(|| Error::Message("User not found".into()))?;
 
     while let Some(field) = multipart
         .next_field()
@@ -102,35 +117,48 @@ pub async fn upload_file(
             .await
             .map_err(|e| Error::Message(format!("Read error: {e}")))?;
 
+        let size = bytes.len() as i64;
+
         let path = ObjectPath::from(file_name.clone());
         store
             .put(&path, bytes.into())
             .await
             .map_err(|e| Error::Message(format!("Upload failed: {e}")))?;
 
-        uploaded.push(file_name);
+        let created_file = file::create(&ctx.db, &file_name, size, author.id).await?;
+        uploaded.push(FileInfo {
+            id: created_file.id,
+            name: created_file.name,
+            size: created_file.size,
+            author: AuthorInfo {
+                id: author.id,
+                login: author.login.clone(),
+            },
+            created_at: created_file.created_at.and_utc().to_rfc3339(),
+        });
     }
 
     Ok(Json(UploadResponse { uploaded }))
 }
 
 pub async fn get_all_files(State(ctx): State<AppContext>) -> Result<Json<Vec<FileInfo>>> {
-    let config = get_s3_config(&ctx);
-    let store = create_s3_store(&config)?;
+    let db_files = file::find_all_with_authors(&ctx.db).await?;
 
-    let mut files = Vec::new();
-    let mut stream = store.list(None);
-
-    while let Some(result) = stream.next().await {
-        let meta = result.map_err(|e| Error::Message(format!("List error: {e}")))?;
-        if let Some(name) = meta.location.filename() {
-            files.push(FileInfo {
-                name: name.to_string(),
-                size: meta.size,
-                last_modified: Some(meta.last_modified.to_rfc3339()),
-            });
-        }
-    }
+    let files = db_files
+        .into_iter()
+        .filter_map(|(f, author)| {
+            author.map(|a| FileInfo {
+                id: f.id,
+                name: f.name,
+                size: f.size,
+                author: AuthorInfo {
+                    id: a.id,
+                    login: a.login,
+                },
+                created_at: f.created_at.and_utc().to_rfc3339(),
+            })
+        })
+        .collect();
 
     Ok(Json(files))
 }
