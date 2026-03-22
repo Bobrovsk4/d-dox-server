@@ -1,9 +1,13 @@
-use axum::routing::{get, post};
+use axum::{
+    http::StatusCode,
+    routing::{get, post},
+};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use loco_rs::controller::Routes;
 use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::models::{role, user};
 
@@ -89,12 +93,22 @@ pub async fn login(
     let found_user = match user::find_by_login(&ctx.db, &payload.login).await? {
         Some(u) => u,
         None => {
-            return Ok(format::json(("Invalid login or password",)).into_response());
+            println!("User {} not found.", &payload.login);
+            return Ok((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Invalid login or password"})),
+            )
+                .into_response());
         }
     };
 
     if !verify_password(&payload.password, &found_user.password)? {
-        return Ok(format::json(("Invalid login or password",)).into_response());
+        println!("Wrong password. Got: {}", &payload.password);
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "Invalid login or password"})),
+        )
+            .into_response());
     }
 
     let user_role = role::Entity::find_by_id(found_user.role_id)
@@ -116,7 +130,7 @@ pub async fn login(
         },
     };
 
-    Ok(format::json(response).into_response())
+    Ok((StatusCode::OK, Json(json!(response))).into_response())
 }
 
 pub async fn logout() -> Result<Response> {
