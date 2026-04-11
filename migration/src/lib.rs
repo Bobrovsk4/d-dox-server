@@ -8,6 +8,7 @@ mod m20250101_000003_create_files;
 mod m20250101_000004_seed_default_data;
 mod m20250101_000005_add_updated_at_to_files;
 mod m20250101_000006_add_version_to_files;
+mod m20250101_000007_create_file_versions;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20250101_000004_seed_default_data::Migration),
             Box::new(m20250101_000005_add_updated_at_to_files::Migration),
             Box::new(m20250101_000006_add_version_to_files::Migration),
+            Box::new(m20250101_000007_create_file_versions::Migration),
             // inject-above (do not remove this comment)
         ]
     }

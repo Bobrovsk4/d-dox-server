@@ -66,6 +66,16 @@ pub async fn find_by_name(db: &DatabaseConnection, name: &str) -> Result<Option<
     Entity::find().filter(Column::Name.eq(name)).one(db).await
 }
 
+pub async fn delete_by_name(db: &DatabaseConnection, name: &str) -> Result<(), DbErr> {
+    use sea_orm::EntityTrait;
+
+    let file = Entity::find().filter(Column::Name.eq(name)).one(db).await?;
+    if let Some(f) = file {
+        Entity::delete_by_id(f.id).exec(db).await?;
+    }
+    Ok(())
+}
+
 pub async fn find_all_with_authors(
     db: &DatabaseConnection,
 ) -> Result<Vec<(Model, Option<super::user::Model>)>, DbErr> {
@@ -119,6 +129,7 @@ pub async fn sync_with_version_check(
     file_id: i32,
     expected_version: i32,
     size: i64,
+    author_id: i32,
 ) -> Result<Model, DbErr> {
     use sea_orm::{ActiveModelTrait, EntityTrait};
 
@@ -134,12 +145,17 @@ pub async fn sync_with_version_check(
         )));
     }
 
+    let new_version = existing.version + 1;
     let now = Utc::now().naive_utc();
     let mut active_model: ActiveModel = existing.clone().into();
     active_model.size = Set(size);
     active_model.updated_at = Set(now);
-    active_model.version = Set(existing.version + 1);
-    active_model.update(db).await
+    active_model.version = Set(new_version);
+    let updated = active_model.update(db).await?;
+
+    super::file_version::create(db, file_id, new_version, size, author_id).await?;
+
+    Ok(updated)
 }
 
 pub async fn sync_by_name_and_author(

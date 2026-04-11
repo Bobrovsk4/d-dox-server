@@ -4,7 +4,7 @@ use axum::{
     extract::{Multipart, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use loco_rs::{controller::Routes, prelude::*};
 use object_store::{
@@ -15,12 +15,21 @@ use object_store::{
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-use crate::models::{file, user};
+use crate::models::{file, file_version, user};
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateWithVersionRequest {
     pub version: i32,
     pub size: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileVersionInfo {
+    pub id: i32,
+    pub version: i32,
+    pub size: i64,
+    pub author: AuthorInfo,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -288,7 +297,7 @@ pub async fn sync_files(
 
     let size = bytes.len() as i64;
 
-    let synced_file = file::sync_with_version_check(&ctx.db, file_id, version, size)
+    let synced_file = file::sync_with_version_check(&ctx.db, file_id, version, size, author.id)
         .await
         .map_err(|e| {
             if e.to_string().contains("Version conflict") {
@@ -298,9 +307,20 @@ pub async fn sync_files(
             }
         })?;
 
-    let path = ObjectPath::from(file_name.clone());
+    let new_version = synced_file.version;
+
+    let versioned_path = ObjectPath::from(format!(
+        "versions/{}/v{}/{}",
+        synced_file.id, new_version, file_name
+    ));
     store
-        .put(&path, bytes.into())
+        .put(&versioned_path, bytes.clone().into())
+        .await
+        .map_err(|e| Error::Message(format!("Upload failed: {e}")))?;
+
+    let latest_path = ObjectPath::from(file_name.clone());
+    store
+        .put(&latest_path, bytes.into())
         .await
         .map_err(|e| Error::Message(format!("Upload failed: {e}")))?;
 
@@ -362,11 +382,157 @@ pub async fn update_file_with_version(
     }))
 }
 
+pub async fn get_file_versions(
+    State(ctx): State<AppContext>,
+    headers: HeaderMap,
+    Path(file_id): Path<i32>,
+) -> Result<Json<Vec<FileVersionInfo>>> {
+    let auth_header = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| Error::Message("Missing Authorization header".into()))?;
+
+    let _token = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
+    let _claims = crate::controllers::auth::decode_token(_token)?;
+
+    let versions = file_version::find_all_by_file_id(&ctx.db, file_id)
+        .await
+        .map_err(|e| Error::Message(e.to_string()))?;
+
+    let version_infos: Vec<FileVersionInfo> = versions
+        .into_iter()
+        .filter_map(|(v, author)| {
+            author.map(|a| FileVersionInfo {
+                id: v.id,
+                version: v.version,
+                size: v.size,
+                author: AuthorInfo {
+                    id: a.id,
+                    login: a.login,
+                },
+                created_at: v.created_at.and_utc().to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Ok(Json(version_infos))
+}
+
+pub async fn get_file_version(
+    State(ctx): State<AppContext>,
+    headers: HeaderMap,
+    Path((file_name, version)): Path<(String, i32)>,
+) -> Result<Response> {
+    let auth_header = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| Error::Message("Missing Authorization header".into()))?;
+
+    let _token = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
+    let _claims = crate::controllers::auth::decode_token(_token)?;
+
+    let file_record = file::find_by_name(&ctx.db, &file_name)
+        .await
+        .map_err(|e| Error::Message(e.to_string()))?
+        .ok_or_else(|| Error::NotFound)?;
+
+    let _version_record =
+        file_version::find_by_file_id_and_version(&ctx.db, file_record.id, version)
+            .await
+            .map_err(|e| Error::Message(e.to_string()))?
+            .ok_or_else(|| Error::NotFound)?;
+
+    let s3_key = format!("versions/{}/v{}/{}", file_record.id, version, file_name);
+
+    let config = get_s3_config(&ctx);
+    let store = create_s3_store(&config)?;
+
+    let path = ObjectPath::from(s3_key.clone());
+
+    let result = match store.get(&path).await {
+        Ok(r) => Ok(r),
+        Err(_) => {
+            let fallback_path = ObjectPath::from(file_name.clone());
+            store.get(&fallback_path).await.map_err(|e| match e {
+                ObjectStoreError::NotFound { .. } => Error::NotFound,
+                _ => Error::Message(format!("Download error: {e}")),
+            })
+        }
+    }?;
+
+    let content_type = mime_guess::from_path(&file_name)
+        .first_or_octet_stream()
+        .to_string();
+
+    let bytes = result
+        .bytes()
+        .await
+        .map_err(|e| Error::Message(format!("Read error: {e}")))?;
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename=\"{}_v{}\"",
+                file_name.trim_end_matches(|c: char| !c.is_alphanumeric()),
+                version
+            ),
+        )
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .body(Body::from(bytes))
+        .map_err(|e| Error::Message(format!("Build response: {e}")))?;
+
+    Ok(response)
+}
+
+pub async fn delete_file(
+    State(ctx): State<AppContext>,
+    headers: HeaderMap,
+    Path(file_name): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let auth_header = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| Error::Message("Missing Authorization header".into()))?;
+
+    let token = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
+    let _claims = crate::controllers::auth::decode_token(token)?;
+
+    let config = get_s3_config(&ctx);
+    let store = create_s3_store(&config)?;
+
+    let file_record = file::find_by_name(&ctx.db, &file_name)
+        .await
+        .map_err(|e| Error::Message(e.to_string()))?;
+
+    let latest_path = ObjectPath::from(file_name.clone());
+    let _ = store.delete(&latest_path).await;
+
+    if let Some(f) = file_record {
+        for v in 1..=f.version {
+            let versioned_path =
+                ObjectPath::from(format!("versions/{}/v{}/{}", f.id, v, file_name));
+            let _ = store.delete(&versioned_path).await;
+        }
+    }
+
+    file::delete_by_name(&ctx.db, &file_name)
+        .await
+        .map_err(|e| Error::Message(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "deleted": file_name })))
+}
+
 pub fn routes() -> Routes {
     Routes::new()
         .prefix("/files")
         .add("", post(upload_file))
         .add("", get(get_all_files))
         .add("/{file_name}", get(get_file))
+        .add("/{file_name}", delete(delete_file))
         .add("/sync", post(sync_files))
+        .add("/{id}/versions", get(get_file_versions))
+        .add("/{file_name}/versions/{version}", get(get_file_version))
 }
