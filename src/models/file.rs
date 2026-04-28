@@ -3,6 +3,8 @@ use loco_rs::prelude::*;
 use sea_orm::{ActiveValue::NotSet, entity::prelude::*};
 use serde::{Deserialize, Serialize};
 
+use super::file_version;
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Deserialize, Serialize)]
 #[sea_orm(table_name = "files")]
 pub struct Model {
@@ -199,4 +201,36 @@ pub async fn sync_by_name_and_author(
         .one(db)
         .await?
         .ok_or(DbErr::RecordNotFound("File not found".to_string()))
+}
+
+pub async fn revert_to_version(
+    db: &DatabaseConnection,
+    file_id: i32,
+    target_version: i32,
+    _author_id: i32,
+) -> Result<Model, DbErr> {
+    let txn = db.begin().await?;
+
+    let target_version_record = file_version::Entity::find()
+        .filter(file_version::Column::FileId.eq(file_id))
+        .filter(file_version::Column::Version.eq(target_version))
+        .one(&txn)
+        .await?
+        .ok_or_else(|| DbErr::Custom(format!("Version {} not found", target_version)))?;
+
+    file_version::delete_versions_newer_than(&txn, file_id, target_version).await?;
+
+    let current_file = Entity::find_by_id(file_id)
+        .one(&txn)
+        .await?
+        .ok_or(DbErr::RecordNotFound(format!("File {} not found", file_id)))?;
+
+    let mut active_file: ActiveModel = current_file.into();
+    active_file.version = Set(target_version);
+    active_file.size = Set(target_version_record.size);
+    active_file.updated_at = Set(Utc::now().naive_utc());
+    let updated_file = active_file.update(&txn).await?;
+
+    txn.commit().await?;
+    Ok(updated_file)
 }

@@ -94,3 +94,41 @@ pub async fn find_all_by_file_id(
         .all(db)
         .await
 }
+
+pub async fn exists_by_file_id_and_version(
+    db: &DatabaseConnection,
+    file_id: i32,
+    version: i32,
+) -> Result<bool, DbErr> {
+    let count = Entity::find()
+        .filter(Column::FileId.eq(file_id))
+        .filter(Column::Version.eq(version))
+        .count(db)
+        .await?;
+    Ok(count > 0)
+}
+
+pub async fn delete_versions_newer_than(
+    db: &impl sea_orm::ConnectionTrait,
+    file_id: i32,
+    version: i32,
+) -> Result<u64, DbErr> {
+    Entity::delete_many()
+        .filter(Column::FileId.eq(file_id))
+        .filter(Column::Version.gt(version))
+        .exec(db)
+        .await
+        .map(|res| res.rows_affected)
+}
+
+pub async fn get_max_version(db: &DatabaseConnection, file_id: i32) -> Result<Option<i32>, DbErr> {
+    use sea_orm::QuerySelect;
+    let result = Entity::find()
+        .select_only()
+        .column_as(Column::Version.max(), "max_version")
+        .filter(Column::FileId.eq(file_id))
+        .into_tuple::<Option<i32>>()
+        .one(db)
+        .await?;
+    Ok(result.flatten())
+}

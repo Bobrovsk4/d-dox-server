@@ -63,6 +63,11 @@ struct S3Config {
     secret_key: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RevertRequest {
+    pub version: i32,
+}
+
 impl Default for S3Config {
     fn default() -> Self {
         Self {
@@ -115,7 +120,6 @@ pub async fn upload_file(
         .ok_or_else(|| Error::Message("Missing Authorization header".into()))?;
 
     let token = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
-
     let claims = crate::controllers::auth::decode_token(token)?;
 
     let config = get_s3_config(&ctx);
@@ -144,13 +148,23 @@ pub async fn upload_file(
 
         let size = bytes.len() as i64;
 
-        let path = ObjectPath::from(file_name.clone());
+        let latest_path = ObjectPath::from(file_name.clone());
         store
-            .put(&path, bytes.into())
+            .put(&latest_path, bytes.clone().into())
             .await
-            .map_err(|e| Error::Message(format!("Upload failed: {e}")))?;
+            .map_err(|e| Error::Message(format!("Upload to latest failed: {e}")))?;
 
         let created_file = file::create(&ctx.db, &file_name, size, author.id).await?;
+
+        file_version::create(&ctx.db, created_file.id, 1, size, author.id).await?;
+
+        let versioned_path =
+            ObjectPath::from(format!("versions/{}/v{}/{}", created_file.id, 1, file_name));
+        store
+            .put(&versioned_path, bytes.into())
+            .await
+            .map_err(|e| Error::Message(format!("Upload to versions failed: {e}")))?;
+
         uploaded.push(FileInfo {
             id: created_file.id,
             name: created_file.name,
@@ -525,6 +539,68 @@ pub async fn delete_file(
     Ok(Json(serde_json::json!({ "deleted": file_name })))
 }
 
+pub async fn revert_file_version(
+    State(ctx): State<AppContext>,
+    headers: HeaderMap,
+    Path(file_id): Path<i32>,
+    Json(req): Json<RevertRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let auth_header = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| Error::Message("Missing Authorization header".into()))?;
+
+    let token = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
+    let claims = crate::controllers::auth::decode_token(token)?;
+
+    let user_id: i32 = claims.pid.parse().unwrap_or(0);
+    let author = user::find_by_id(&ctx.db, user_id)
+        .await?
+        .ok_or_else(|| Error::Message("User not found".into()))?;
+
+    let max_version_before = file_version::get_max_version(&ctx.db, file_id)
+        .await?
+        .unwrap_or(req.version);
+
+    let updated_file = file::revert_to_version(&ctx.db, file_id, req.version, author.id).await?;
+
+    let config = get_s3_config(&ctx);
+    let store = create_s3_store(&config)?;
+    let file_name = &updated_file.name;
+
+    for v in (req.version + 1)..=max_version_before {
+        let versioned_path = ObjectPath::from(format!("versions/{}/v{}/{}", file_id, v, file_name));
+        let _ = store.delete(&versioned_path).await;
+    }
+
+    let target_version_path = ObjectPath::from(format!(
+        "versions/{}/v{}/{}",
+        file_id, req.version, file_name
+    ));
+    let target_data = store
+        .get(&target_version_path)
+        .await
+        .map_err(|e| Error::Message(format!("Target version not found in S3: {e}")))?;
+    let bytes = target_data
+        .bytes()
+        .await
+        .map_err(|e| Error::Message(format!("Failed to read target version: {e}")))?;
+    let latest_path = ObjectPath::from(file_name.clone());
+    store
+        .put(&latest_path, bytes.into())
+        .await
+        .map_err(|e| Error::Message(format!("Failed to update latest file: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "file": {
+            "id": updated_file.id,
+            "name": updated_file.name,
+            "version": updated_file.version,
+        }
+    })))
+}
+
 pub fn routes() -> Routes {
     Routes::new()
         .prefix("/files")
@@ -535,4 +611,5 @@ pub fn routes() -> Routes {
         .add("/sync", post(sync_files))
         .add("/{id}/versions", get(get_file_versions))
         .add("/{file_name}/versions/{version}", get(get_file_version))
+        .add("/{id}/revert", post(revert_file_version))
 }
